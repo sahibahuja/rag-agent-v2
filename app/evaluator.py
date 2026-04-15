@@ -8,7 +8,13 @@ from typing import Any, Union, List
 class OllamaDeepEval(DeepEvalBaseLLM):
     def __init__(self, model_name: str = "llama3.2:3b"):
         # We don't call super().__init__ because DeepEvalBaseLLM doesn't require it
-        self.model = ChatOllama(model=model_name)
+        
+        # 🚨 THE FIX: Force JSON mode and make the model 100% deterministic
+        self.model = ChatOllama(
+            model=model_name,
+            format="json",
+            temperature=0.0
+        )
 
     # FIX 1: The return type must technically be 'Any' or 'DeepEvalBaseLLM'
     # but since this method is meant to return the underlying model, we use Any

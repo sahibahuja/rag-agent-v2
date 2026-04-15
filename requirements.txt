@@ -25,3 +25,4 @@ openinference-instrumentation-langchain
 
 # --- Session Persistence ---
 redis
+langgraph-checkpoint-redis

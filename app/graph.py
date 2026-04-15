@@ -1,8 +1,8 @@
 from langgraph.graph import StateGraph, END
 from app.schemas import GraphState
-from nodes import rewrite_query, retrieve_docs, grade_documents, generate_answer, validate_answer
+from app.nodes import rewrite_query, retrieve_docs, grade_documents, generate_answer, validate_answer
 
-# 3. Define the Router (Conditional Logic)
+# 1. Define the Router (Conditional Logic)
 def decide_to_generate(state: GraphState):
     print("--- DECIDING NEXT STEP ---")
     relevance = state.get("is_relevant", "no")
@@ -18,36 +18,34 @@ def decide_to_generate(state: GraphState):
         print("--- DECISION: REWRITE ---")
         return "rewrite"
 
-# 4. Build the Graph
-def create_graph():
-    workflow = StateGraph(GraphState)
+# 2. Initialize the Graph Builder
+builder = StateGraph(GraphState)
 
-    # Add Nodes
-    workflow.add_node("rewrite", rewrite_query)
-    workflow.add_node("retrieve", retrieve_docs)
-    workflow.add_node("grade", grade_documents)
-    workflow.add_node("generate", generate_answer)
-    workflow.add_node("validate", validate_answer)
-    # Define the Flow
-    workflow.set_entry_point("retrieve") # Start by searching
+# 3. Add Nodes
+builder.add_node("rewrite", rewrite_query)
+builder.add_node("retrieve", retrieve_docs)
+builder.add_node("grade", grade_documents)
+builder.add_node("generate", generate_answer)
+builder.add_node("validate", validate_answer)
 
-    workflow.add_edge("retrieve", "grade")
-    
-    # The "Brain" of the Agent: Conditional branching
-    workflow.add_conditional_edges(
-        "grade",
-        decide_to_generate,
-        {
-            "generate": "generate",
-            "rewrite": "rewrite"
-        }
-    )
+# 4. Define the Flow
+builder.set_entry_point("retrieve") # Start by searching
+builder.add_edge("retrieve", "grade")
 
-    workflow.add_edge("rewrite", "retrieve")
-    workflow.add_edge("generate", "validate") 
-    workflow.add_edge("validate", END)
+# The "Brain" of the Agent: Conditional branching
+builder.add_conditional_edges(
+    "grade",
+    decide_to_generate,
+    {
+        "generate": "generate",
+        "rewrite": "rewrite"
+    }
+)
 
-    return workflow.compile()
+builder.add_edge("rewrite", "retrieve")
+builder.add_edge("generate", "validate") 
+builder.add_edge("validate", END)
 
-# Final Compiled App
-app = create_graph()
+# EXPORT THE BUILDER 
+# (We DO NOT compile it here. We compile it in main.py with the Redis Checkpointer attached!)
+agent_builder = builder

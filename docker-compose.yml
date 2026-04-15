@@ -16,11 +16,13 @@ services:
 
   # 2. Stateful Memory (Conversation History)
   redis:
-    image: redis:alpine
-    container_name: redis_v2
+    image: redis/redis-stack-server:latest
+    container_name: agent_redis
     ports:
       - "6379:6379"
-    restart: always
+    restart: unless-stopped
+    volumes:
+      - ./redis_data:/data
 
   # 3. Observability & Tracing (Arize Phoenix)
   # FIXED: Corrected image name to arizephoenix/phoenix

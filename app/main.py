@@ -6,9 +6,9 @@ from app.schemas import StorePayload, ChatPayload, ChatResponse
 from app.database import init_db
 from app.engine import process_file
 from app.observability import setup_tracing
-# We will import the graph 'app' once we've finalized nodes.py
-# from app.graph import app as agent_app 
-
+from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+from langchain_core.runnables import RunnableConfig
+from typing import cast
 # --- 1. Lifespan Orchestration ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -57,25 +57,38 @@ async def ingest_file(payload: StorePayload, background_tasks: BackgroundTasks):
 
 @app.post("/v2/agent/chat")
 async def chat_endpoint(payload: ChatPayload):
-    from app.graph import app as agent_graph,GraphState # Import the compiled graph
+    from app.graph import agent_builder, GraphState
     
-    inputs = {
+    # 1. Provide a default thread_id if the user didn't send one
+    thread_id = payload.thread_id or "default_session_1"
+    
+    # FIX 1: Cast the config dict to RunnableConfig to satisfy Pyright
+    config = cast(RunnableConfig, {"configurable": {"thread_id": thread_id}})
+    
+    # FIX 2: Cast the input dict to GraphState to satisfy Pyright
+    inputs = cast(GraphState, {
         "question": payload.question,
         "iteration_count": 0,
-        "response": "",  # Initialize empty strings for safety
+        "response": "",  
         "context": []
-    }
-    from typing import cast
-    # This actually runs the LangGraph nodes you've been editing
-    final_state = await agent_graph.ainvoke(cast(GraphState, inputs)) 
+    })
+    
+    # FIX 3: Use from_conn_string instead of from_conn_info
+    redis_uri = "redis://localhost:6379"
+    
+    async with AsyncRedisSaver.from_conn_string(redis_uri) as checkpointer:
+        # Compile the graph WITH the memory attached
+        agent_graph = agent_builder.compile(checkpointer=checkpointer)
+        
+        # Run it! 
+        final_state = await agent_graph.ainvoke(inputs, config) 
     
     return {
-        # Mapping 'response' from Graph to 'answer' in API
         "answer": final_state.get("response", "I'm sorry, I couldn't find an answer."),
         "sources": final_state.get("sources", []),
         "iteration_count": final_state.get("iteration_count", 0),
         "faithfulness_score": final_state.get("faithfulness_score", 0.0),
         "faithfulness_reason": final_state.get("faithfulness_reason", "Evaluation skipped.")
-        }
+    }
 if __name__ == "__main__":
     uvicorn.run("app.main:app", host="0.0.0.0", port=8080, reload=False)
