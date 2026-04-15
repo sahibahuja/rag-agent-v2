@@ -1,0 +1,27 @@
+# --- API & Server ---
+fastapi
+uvicorn
+pydantic
+
+# --- LLM & Agent Framework ---
+langchain
+langchain-core
+langchain-community
+langgraph
+langchain-ollama
+
+# --- Document Ingestion ---
+docling
+
+# --- Vector Database & Embeddings ---
+qdrant-client
+fastembed
+
+# --- Evaluation & Observability ---
+deepeval
+opentelemetry-api
+opentelemetry-sdk
+openinference-instrumentation-langchain
+
+# --- Session Persistence ---
+redis

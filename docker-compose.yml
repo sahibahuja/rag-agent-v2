@@ -1,0 +1,37 @@
+version: "3.8"
+
+name: rag-agent-v2
+
+services:
+  # 1. Vector Database (Knowledge Base)
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant_v2
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - ./qdrant_storage:/qdrant/storage
+    restart: always
+
+  # 2. Stateful Memory (Conversation History)
+  redis:
+    image: redis:alpine
+    container_name: redis_v2
+    ports:
+      - "6379:6379"
+    restart: always
+
+  # 3. Observability & Tracing (Arize Phoenix)
+  # FIXED: Corrected image name to arizephoenix/phoenix
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: phoenix_v2
+    ports:
+      - "6006:6006" # Dashboard UI
+      - "4319:4317" # OTLP Collector
+    restart: always
+
+networks:
+  default:
+    name: rag_network_v2

@@ -1,0 +1,25 @@
+# Environments
+.env
+.venv
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# IDEs and OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Logs and databases (if local)
+*.log
+*.sqlite3
+
+# Local data and caches
+qdrant_storage/
+.deepeval/
