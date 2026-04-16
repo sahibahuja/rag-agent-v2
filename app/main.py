@@ -10,7 +10,6 @@ from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langchain_core.runnables import RunnableConfig
 from typing import cast
 from opentelemetry import trace
-from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags
 # --- 1. Lifespan Orchestration ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -33,25 +32,18 @@ app = FastAPI(
 )
 
 # --- 3. Background Task Helper ---
-def run_background_eval(question: str, context: str, answer: str, trace_id: int, span_id: int):
-    """Runs DeepEval and mathematically forces the Trace ID using a Phantom Parent"""
+def run_background_eval(question: str, context: str, answer: str, thread_id: str):
+    """Runs DeepEval as an independent trace, linked by Correlation ID"""
     tracer = trace.get_tracer(__name__)
     
-    # 🚨 THE ULTIMATE FIX: Reconstruct the dead parent mathematically
-    phantom_parent_context = SpanContext(
-        trace_id=trace_id,
-        span_id=span_id,
-        is_remote=True,           # Tells OTEL "Trust me, the parent is elsewhere"
-        trace_flags=TraceFlags(1) # Ensures the trace is recorded
-    )
-    
-    # Wrap it in a context
-    ctx = trace.set_span_in_context(NonRecordingSpan(phantom_parent_context))
-    
-    # Start the span forcing that exact context
-    with tracer.start_as_current_span("DeepEval_Background_Check", context=ctx) as span:
+    # Start a clean, independent span
+    with tracer.start_as_current_span("DeepEval_Background_Check") as span:
         from app.evaluator import check_faithfulness
-        print(f"\n🕵️‍♂️ [BACKGROUND] Starting DeepEval with forced Trace ID...")
+        print(f"\n🕵️‍♂️ [BACKGROUND] Starting DeepEval for thread: {thread_id}...")
+        
+        # 🚨 THE MAGIC: Tag this span with the Correlation ID
+        span.set_attribute("session.thread_id", thread_id)
+        span.set_attribute("question", question)
         
         score, reason = check_faithfulness(question, context, answer)
         
@@ -103,19 +95,13 @@ async def chat_endpoint(payload: ChatPayload, background_tasks: BackgroundTasks)
     context_str = "\n".join(final_state.get("context", []))
     sources = final_state.get("sources", [])
     
-   # 3a. Extract the raw mathematical IDs before FastAPI ends the trace!
-    current_span_context = trace.get_current_span().get_span_context()
-    raw_trace_id = current_span_context.trace_id
-    raw_span_id = current_span_context.span_id
-    
-    # 3b. Pass the integers, not the object!
+   # 3
     background_tasks.add_task(
         run_background_eval, 
         payload.question, 
         context_str, 
         answer,
-        raw_trace_id,
-        raw_span_id
+        thread_id # <--- Passing the Correlation ID
     )
     
     # 4. Return to user immediately!

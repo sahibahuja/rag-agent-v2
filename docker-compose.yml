@@ -24,6 +24,14 @@ services:
     volumes:
       - ./redis_data:/data
 
+  redisinsight:
+    image: redis/redisinsight:latest
+    container_name: redisinsight
+    ports:
+      - "8001:5540" # The UI will be available on port 8001
+    depends_on:
+      - redis       # Make sure your main redis service is named 'redis'
+
   # 3. Observability & Tracing (Arize Phoenix)
   # FIXED: Corrected image name to arizephoenix/phoenix
   phoenix:
