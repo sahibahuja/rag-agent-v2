@@ -8,16 +8,24 @@ from app.schemas import RouteQuery, GradeSchema
 from app.evaluator import check_faithfulness
 
 # --- 1. The Router Node (PILLAR 1) ---
+# --- 1. The Router Node ---
 def route_question(state: GraphState):
     print("--- NODE: ROUTING QUESTION ---")
     question = state.get("question", "")
+    
     structured_llm_router = llm.with_structured_output(RouteQuery)
     
     response = cast(RouteQuery, structured_llm_router.invoke([
-        ("system", "Route the user query. Use 'vector_store' for Document questions and 'chat_history' for greetings or memory."),
+        ("system", "Route the user query. Use 'vector_store' for PDF questions and 'chat_history' for greetings or memory."),
         ("human", question)
     ]))
     
+    # 🚨 THE SAFETY NET 🚨
+    # If the LLM goes rogue, default to PDF search so the app doesn't crash
+    if response.datasource not in ["vector_store", "chat_history"]:
+        print(f"⚠️ Router hallucinated '{response.datasource}', defaulting to 'vector_store'")
+        return "vector_store"
+        
     print(f"DEBUG: Routing to -> {response.datasource}")
     return response.datasource
 
@@ -115,13 +123,3 @@ def generate_answer(state: GraphState):
         "sources": sources,
         "history": [f"User: {question}", f"AI: {response.content}"]
     }
-
-# --- 7. The Validator Node ---
-def validate_answer(state: GraphState):
-    print("--- NODE: VALIDATING ---")
-    score, reason = check_faithfulness(
-        state.get("question", ""),
-        "\n".join(state.get("context", [])),
-        state.get("response", "")
-    )
-    return {"faithfulness_score": score, "faithfulness_reason": reason}

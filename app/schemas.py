@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional, Annotated, TypedDict
 import operator
-from typing_extensions import NotRequired
+from typing_extensions import NotRequired, Literal
 
 # --- Phase 1: Data Contracts ---
 
@@ -34,7 +34,10 @@ class ChatResponse(BaseModel):
 
 class RouteQuery(BaseModel):
     """Routing logic: Where should the question go?"""
-    datasource: str = Field(description="Choose 'vector_store' (Document) or 'chat_history' (General/Memory)")
+    # CHANGED: 'str' is now 'Literal["vector_store", "chat_history"]'
+    datasource: Literal["vector_store", "chat_history"] = Field(
+        description="You MUST choose exactly 'vector_store' or 'chat_history'. Do not use any other words."
+    )
 
 class GradeSchema(BaseModel):
     """Relevance check: Is the document useful?"""

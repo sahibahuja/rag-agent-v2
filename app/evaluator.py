@@ -1,67 +1,53 @@
-import json
-from pydantic import BaseModel, Field
 from deepeval.metrics import FaithfulnessMetric
 from deepeval.test_case import LLMTestCase
 from deepeval.models.base_model import DeepEvalBaseLLM
 from langchain_ollama import ChatOllama
-from typing import Any, List, Optional
-from typing import cast, Any, List, Optional, Union
-
-# 1. Define the exact Schema DeepEval expects
-# This forces the LLM to provide 'truths' and 'claims' specifically.
-class FaithfulnessSchema(BaseModel):
-    truths: List[str] = Field(description="List of factual statements extracted from the retrieval context.")
-    claims: List[str] = Field(description="List of claims made in the actual output.")
+from typing import Any
 
 class OllamaDeepEval(DeepEvalBaseLLM):
     def __init__(self, model_name: str = "llama3.1:8b"):
-        # We use the 8B model for higher reasoning accuracy
+        # We drop the strict Pydantic schema here!
+        # The 8B model is smart enough to follow DeepEval's native prompts.
         self.model = ChatOllama(
             model=model_name,
-            format="json",
+            format="json", # This acts as a gentle boundary, not a strict cage
             temperature=0.0
         )
-        # Bind the schema to the model for Structured Output
-        self.structured_model = self.model.with_structured_output(FaithfulnessSchema)
 
     def load_model(self) -> Any:
         return self.model
 
     def generate(self, prompt: str) -> str:
         try:
-            # We tell Pyright: 'The result will be a FaithfulnessSchema OR a dict'
-            res = self.structured_model.invoke(prompt)
-            
-            # Handle if it's already a dictionary (failsafe)
-            if isinstance(res, dict):
-                return json.dumps(res)
-            
-            # Use 'cast' to access Pydantic methods safely
-            return cast(FaithfulnessSchema, res).model_dump_json()
-            
+            # Let the model answer DeepEval exactly how it wants
+            res = self.model.invoke(prompt)
+            return str(res.content)
         except Exception as e:
-            print(f"--- STRUCTURED GEN ERROR: {e} ---")
-            return json.dumps({"truths": [], "claims": []})
+            print(f"--- DEEPEVAL GEN ERROR: {e} ---")
+            return "{}"
 
     async def a_generate(self, prompt: str) -> str:
         try:
-            res = await self.structured_model.ainvoke(prompt)
-            
-            if isinstance(res, dict):
-                return json.dumps(res)
-                
-            return cast(FaithfulnessSchema, res).model_dump_json()
-            
+            res = await self.model.ainvoke(prompt)
+            return str(res.content)
         except Exception as e:
-            print(f"--- STRUCTURED ASYNC GEN ERROR: {e} ---")
-            return json.dumps({"truths": [], "claims": []})
+            print(f"--- DEEPEVAL ASYNC GEN ERROR: {e} ---")
+            return "{}"
+
     def get_model_name(self) -> str:
-        return "Llama 3.1 8B (Structured)"
+        return "Llama 3.1 8B"
 
 def check_faithfulness(question: str, context: str, answer: str):
+    """
+    Called by the Background Task.
+    Now that the Pydantic cage is gone, DeepEval can successfully calculate the 'verdicts'.
+    """
+    # 1. Skip evaluation if there is no context (e.g., chat history questions)
+    if not context or context.strip() == "" or context == "No context found.":
+        print("⏭️ Skipping Faithfulness: No PDF context to evaluate against.")
+        return 1.0, "System question / Chat history used (No context needed)."
+
     judge_model = OllamaDeepEval()
-    
-    # Threshold 0.7: If faithfulness is low, we know the AI halluncinated.
     metric = FaithfulnessMetric(threshold=0.7, model=judge_model)
     
     test_case = LLMTestCase(
@@ -71,13 +57,13 @@ def check_faithfulness(question: str, context: str, answer: str):
     )
     
     try:
+        # This will now successfully complete all 3 steps!
         metric.measure(test_case)
-        # DeepEval might return None if it fails internally, so we use 'or 0.0'
+        
         score = float(metric.score) if metric.score is not None else 0.5
-        reason = str(metric.reason) if metric.reason else "Reasoning failed but check completed."
+        reason = str(metric.reason) if metric.reason else "Reasoning completed."
         
         return score, reason
     except Exception as e:
-        # Final safety net so the FastAPI endpoint doesn't return 500
-        print(f"⚠️ DeepEval Critical Failure: {e}")
+        print(f"⚠️ DeepEval Error: {e}")
         return 0.5, f"Evaluation error: {str(e)}"

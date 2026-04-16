@@ -5,7 +5,6 @@ from app.nodes import (
     retrieve_docs, 
     grade_documents, 
     generate_answer, 
-    validate_answer,
     route_question  # 🚨 ADDED: Import the router!
 )
 
@@ -15,9 +14,9 @@ def decide_to_generate(state: GraphState):
     relevance = state.get("is_relevant", "no")
     count = state.get("iteration_count", 0)
     
+    # 🚨 Put this line back in!
     print(f"DEBUG: Current iteration: {count}, Relevance: {relevance}")
-
-    # PILLAR 4: Speed Cap (Try twice, then just answer)
+    
     if relevance == "yes" or count >= 1:
         print("--- DECISION: GENERATE (Limit reached or relevant) ---")
         return "generate"
@@ -25,30 +24,25 @@ def decide_to_generate(state: GraphState):
         print("--- DECISION: REWRITE ---")
         return "rewrite"
 
-# 2. Initialize the Graph Builder
 builder = StateGraph(GraphState)
 
-# 3. Add Nodes
+# Add Nodes (Removed 'validate')
 builder.add_node("rewrite", rewrite_query)
 builder.add_node("retrieve", retrieve_docs)
 builder.add_node("grade", grade_documents)
 builder.add_node("generate", generate_answer)
-builder.add_node("validate", validate_answer)
 
-# 4. Define the Flow (PILLAR 1: The Express Lane)
-# Instead of hardcoding "retrieve", we let the router decide where to start.
+# Define the Flow
 builder.set_conditional_entry_point(
     route_question,
     {
-        "vector_store": "retrieve",  # If it's a DOCUMENT question, go to search
-        "chat_history": "generate"   # If it's a memory/greeting question, skip search!
+        "vector_store": "retrieve",  
+        "chat_history": "generate"   
     }
 )
 
-# Standard Edges
 builder.add_edge("retrieve", "grade")
 
-# The "Brain" of the Agent: Conditional branching for the loop
 builder.add_conditional_edges(
     "grade",
     decide_to_generate,
@@ -59,9 +53,8 @@ builder.add_conditional_edges(
 )
 
 builder.add_edge("rewrite", "retrieve")
-builder.add_edge("generate", "validate") 
-builder.add_edge("validate", END)
 
-# EXPORT THE BUILDER 
-# (We DO NOT compile it here. We compile it in main.py with the Redis Checkpointer attached!)
+# 🚨 THE FIX: Generate goes straight to END now!
+builder.add_edge("generate", END) 
+
 agent_builder = builder
