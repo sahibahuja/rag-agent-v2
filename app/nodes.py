@@ -1,144 +1,127 @@
-from typing import List
+from typing import List, cast, Any
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from app.llm import llm
 from app.graph import GraphState
 from app.engine import get_context_from_qdrant
-from typing import cast
-from typing import Any
-
+from app.schemas import RouteQuery, GradeSchema
 from app.evaluator import check_faithfulness
 
-def validate_answer(state: GraphState):
-    print("--- NODE: VALIDATING WITH DEEPEVAL ---")
-    
+# --- 1. The Router Node (PILLAR 1) ---
+def route_question(state: GraphState):
+    print("--- NODE: ROUTING QUESTION ---")
     question = state.get("question", "")
-    # SYNCED: Now matches what generate_answer returns
-    answer = state.get("response", "") 
+    structured_llm_router = llm.with_structured_output(RouteQuery)
     
-    # SYNCED: Using 'context' as that's what retrieve_docs provides
-    context_list = state.get("context", [])
-    context = "\n".join(context_list) if context_list else "No context"
-    if not answer or answer.strip() == "":
-        return {"faithfulness_score": 0.0, "faithfulness_reason": "No answer generated to validate."}
-    # Run DeepEval
-    score, reason = check_faithfulness(question, context, answer)
+    response = cast(RouteQuery, structured_llm_router.invoke([
+        ("system", "Route the user query. Use 'vector_store' for Document questions and 'chat_history' for greetings or memory."),
+        ("human", question)
+    ]))
     
-    print(f"⭐ DeepEval Faithfulness Score: {score}")
-    print(f"📝 Reason: {reason}")
-    
-    return {
-        "faithfulness_score": score,
-        "faithfulness_reason": reason
-    }
+    print(f"DEBUG: Routing to -> {response.datasource}")
+    return response.datasource
 
-# --- 1. The Rewriter Node ---
-def rewrite_query(state: GraphState):
-    """
-    Optimizes the user's question for Vector Search and increments the loop counter.
-    """
-    print("--- NODE: REWRITING QUERY ---")
-    question = state.get("question", "")
-    
-    # 1. IMPORTANT: Get and increment the current count
-    current_count = state.get("iteration_count", 0)
-    new_count = current_count + 1
-    
-    # 2. Optimize the query
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", "You are a search optimizer. Convert the user's input into a "
-                   "single, high-quality standalone search query. "
-                   "Output ONLY the query string, no preamble."),
-        ("human", "{question}")
-    ])
-    
-    # Using the pipe is fine here as long as we treat the output as a string
-    chain = prompt | llm | StrOutputParser()
-    new_query = chain.invoke({"question": question})
-    
-    # 3. Return BOTH the new query and the incremented count
-    # This ensures the GraphState is updated so decide_to_generate can stop the loop
-    return {
-        "search_query": str(new_query).strip(),
-        "iteration_count": new_count
-    }
+# --- 2. The Retrieval Node (PILLAR 4 Optimized + SOURCES) ---
 def retrieve_docs(state: GraphState):
     print("--- NODE: RETRIEVING FROM QDRANT ---")
-    search_query = state.get("search_query", state.get("question", ""))
+    search_query = state.get("search_query") or state.get("question", "")
     
-    # We skip the 'Chain' (|) and Parser for this specific node to kill the error
-    system_msg = "Generate 2 alternative search queries. Output one per line."
-    human_msg = f"Query: {search_query}"
-    
-    # Call LLM directly - this returns a BaseMessage object
+    # Pillar 4: Generate 1 alternative query to save time
+    system_msg = "Generate 1 alternative search query. Output ONLY the query text."
     response = llm.invoke([
         ("system", system_msg),
-        ("human", human_msg)
+        ("human", f"Query: {search_query}")
     ])
     
-    # Force cast the content to string and perform the split
-    # Since response.content is explicitly a string/list union, 
-    # we force it to string to stop Pylance from guessing.
-    raw_text = str(response.content)
+    queries = [search_query, str(response.content).strip()]
     
-    # Process the lines
-    queries = [search_query]
-    for line in raw_text.split("\n"):
-        clean_line = line.strip()
-        if clean_line:
-            queries.append(clean_line)
-    
-    # Pass to your engine
+    # 🚨 KEPT: Your source-tracking engine call
     context_str, sources = get_context_from_qdrant(queries, limit=3)
     
     return {"context": [context_str], "sources": sources}
-# --- 3. The Grader Node ---
+
+# --- 3. The Grader Node (PILLAR 2 Structured) ---
 def grade_documents(state: GraphState):
     print("--- NODE: GRADING RELEVANCE ---")
-    context_list = state.get("context", [])
-    context = context_list[0] if context_list else ""
+    structured_grader = llm.with_structured_output(GradeSchema)
+    
+    context = "\n\n".join(state.get("context", []))
     question = state.get("question", "")
 
-    # Structured prompt to force 1-word output
-    system_msg = (
-        "You are a binary classifier. "
-        "Rules:\n1. If the context helps answer the question, say 'YES'.\n"
-        "2. If not, say 'NO'.\n"
-        "3. DO NOT EXPLAIN. DO NOT SAY 'I CAN HELP'. ONLY SAY 'YES' OR 'NO'."
-    )
+    response = cast(GradeSchema, structured_grader.invoke([
+        ("system", "You are a grader assessing relevance of a retrieved document to a user question. Answer 'yes' or 'no'."),
+        ("human", f"Context: {context}\n\nQuestion: {question}")
+    ]))
+    
+    grade = response.binary_score.lower().strip()
+    print(f"--- GRADER RESULT: {grade} ---")
+    
+    return {"is_relevant": grade}
+
+# --- 4. The Decision Node (PILLAR 4 Speed Cap) ---
+def decide_to_generate(state: GraphState):
+    print("--- DECIDING NEXT STEP ---")
+    if state.get("is_relevant") == "yes" or state.get("iteration_count", 0) >= 2:
+        return "generate"
+    return "rewrite"
+
+# --- 5. The Rewriter Node ---
+def rewrite_query(state: GraphState):
+    print("--- NODE: REWRITING QUERY ---")
+    question = state.get("question", "")
+    history = state.get("history", [])
+    current_count = state.get("iteration_count", 0)
+    
+    history_str = "\n".join(history) if history else "No previous conversation."
+    system_msg = "You are a search optimizer. Output ONLY optimized search keywords based on history."
     
     response = llm.invoke([
         ("system", system_msg),
-        ("human", f"Context: {context}\n\nQuestion: {question}\n\nResult:")
+        ("human", f"History: {history_str}\n\nQuestion: {question}")
     ])
-    
-    raw_grade = str(response.content).upper().strip()
-    
-    # Logic check: if 'YES' is anywhere, it's a 'yes'
-    grade = "yes" if "YES" in raw_grade else "no"
-    
-    print(f"--- GRADER RESULT: {grade} (Raw: {raw_grade[:30]}) ---")
-    return {"is_relevant": grade}
-# --- 4. The Generator Node ---
+
+    clean_query = str(response.content).strip().split('\n')[-1].replace('"', '')
+    return {
+        "search_query": clean_query, 
+        "iteration_count": current_count + 1
+    }
+
+# --- 6. The Generator Node (SOURCES RESTORED) ---
 def generate_answer(state: GraphState):
     print("--- NODE: GENERATING ANSWER ---")
     context_list = state.get("context", [])
     context = "\n\n".join(context_list) if context_list else "No context found."
     question = state.get("question", "")
+    
+    # 🚨 KEPT: Pulling sources from the state
     sources = state.get("sources", [])
+    
+    history = state.get("history", [])
+    history_str = "\n".join(history) if history else "No previous conversation."
 
     system_msg = (
-        "You are a helpful assistant. Use the provided context to answer the question. "
-        "If the context doesn't have the answer, say you don't know."
+        "You are a helpful assistant. "
+        "Use CONTEXT for document facts and HISTORY for conversation questions."
     )
     
     response = llm.invoke([
         ("system", system_msg),
-        ("human", f"Context: {context}\n\nQuestion: {question}")
+        ("human", f"History:\n{history_str}\n\nContext:\n{context}\n\nQuestion: {question}")
     ])
 
-    # KEY CHANGE: Returning 'response' to match validate_answer
+    # 🚨 KEPT: Returning 'sources' in the final payload
     return {
         "response": str(response.content), 
-        "sources": sources
+        "sources": sources,
+        "history": [f"User: {question}", f"AI: {response.content}"]
     }
+
+# --- 7. The Validator Node ---
+def validate_answer(state: GraphState):
+    print("--- NODE: VALIDATING ---")
+    score, reason = check_faithfulness(
+        state.get("question", ""),
+        "\n".join(state.get("context", [])),
+        state.get("response", "")
+    )
+    return {"faithfulness_score": score, "faithfulness_reason": reason}

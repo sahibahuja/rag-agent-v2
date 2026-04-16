@@ -1,8 +1,15 @@
 from langgraph.graph import StateGraph, END
 from app.schemas import GraphState
-from app.nodes import rewrite_query, retrieve_docs, grade_documents, generate_answer, validate_answer
+from app.nodes import (
+    rewrite_query, 
+    retrieve_docs, 
+    grade_documents, 
+    generate_answer, 
+    validate_answer,
+    route_question  # 🚨 ADDED: Import the router!
+)
 
-# 1. Define the Router (Conditional Logic)
+# 1. Define the Router (Conditional Logic for Loops)
 def decide_to_generate(state: GraphState):
     print("--- DECIDING NEXT STEP ---")
     relevance = state.get("is_relevant", "no")
@@ -10,8 +17,8 @@ def decide_to_generate(state: GraphState):
     
     print(f"DEBUG: Current iteration: {count}, Relevance: {relevance}")
 
-    # FORCE STOP: If we've tried 3 times, we MUST generate even if it's 'no'
-    if relevance == "yes" or count >= 3:
+    # PILLAR 4: Speed Cap (Try twice, then just answer)
+    if relevance == "yes" or count >= 1:
         print("--- DECISION: GENERATE (Limit reached or relevant) ---")
         return "generate"
     else:
@@ -28,11 +35,20 @@ builder.add_node("grade", grade_documents)
 builder.add_node("generate", generate_answer)
 builder.add_node("validate", validate_answer)
 
-# 4. Define the Flow
-builder.set_entry_point("retrieve") # Start by searching
+# 4. Define the Flow (PILLAR 1: The Express Lane)
+# Instead of hardcoding "retrieve", we let the router decide where to start.
+builder.set_conditional_entry_point(
+    route_question,
+    {
+        "vector_store": "retrieve",  # If it's a DOCUMENT question, go to search
+        "chat_history": "generate"   # If it's a memory/greeting question, skip search!
+    }
+)
+
+# Standard Edges
 builder.add_edge("retrieve", "grade")
 
-# The "Brain" of the Agent: Conditional branching
+# The "Brain" of the Agent: Conditional branching for the loop
 builder.add_conditional_edges(
     "grade",
     decide_to_generate,

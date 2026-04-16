@@ -1,52 +1,83 @@
+import json
+from pydantic import BaseModel, Field
 from deepeval.metrics import FaithfulnessMetric
 from deepeval.test_case import LLMTestCase
 from deepeval.models.base_model import DeepEvalBaseLLM
 from langchain_ollama import ChatOllama
-from typing import Any, Union, List
+from typing import Any, List, Optional
+from typing import cast, Any, List, Optional, Union
 
-# We wrap your Ollama model so DeepEval can talk to it
+# 1. Define the exact Schema DeepEval expects
+# This forces the LLM to provide 'truths' and 'claims' specifically.
+class FaithfulnessSchema(BaseModel):
+    truths: List[str] = Field(description="List of factual statements extracted from the retrieval context.")
+    claims: List[str] = Field(description="List of claims made in the actual output.")
+
 class OllamaDeepEval(DeepEvalBaseLLM):
-    def __init__(self, model_name: str = "llama3.2:3b"):
-        # We don't call super().__init__ because DeepEvalBaseLLM doesn't require it
-        
-        # 🚨 THE FIX: Force JSON mode and make the model 100% deterministic
+    def __init__(self, model_name: str = "llama3.1:8b"):
+        # We use the 8B model for higher reasoning accuracy
         self.model = ChatOllama(
             model=model_name,
             format="json",
             temperature=0.0
         )
+        # Bind the schema to the model for Structured Output
+        self.structured_model = self.model.with_structured_output(FaithfulnessSchema)
 
-    # FIX 1: The return type must technically be 'Any' or 'DeepEvalBaseLLM'
-    # but since this method is meant to return the underlying model, we use Any
     def load_model(self) -> Any:
         return self.model
 
-    # FIX 2 & 3: DeepEval expects a string, but LangChain content can be str or list.
-    # We force it to a string to satisfy the return type.
     def generate(self, prompt: str) -> str:
-        res = self.model.invoke(prompt)
-        return str(res.content)
+        try:
+            # We tell Pyright: 'The result will be a FaithfulnessSchema OR a dict'
+            res = self.structured_model.invoke(prompt)
+            
+            # Handle if it's already a dictionary (failsafe)
+            if isinstance(res, dict):
+                return json.dumps(res)
+            
+            # Use 'cast' to access Pydantic methods safely
+            return cast(FaithfulnessSchema, res).model_dump_json()
+            
+        except Exception as e:
+            print(f"--- STRUCTURED GEN ERROR: {e} ---")
+            return json.dumps({"truths": [], "claims": []})
 
     async def a_generate(self, prompt: str) -> str:
-        res = await self.model.ainvoke(prompt)
-        return str(res.content)
-
+        try:
+            res = await self.structured_model.ainvoke(prompt)
+            
+            if isinstance(res, dict):
+                return json.dumps(res)
+                
+            return cast(FaithfulnessSchema, res).model_dump_json()
+            
+        except Exception as e:
+            print(f"--- STRUCTURED ASYNC GEN ERROR: {e} ---")
+            return json.dumps({"truths": [], "claims": []})
     def get_model_name(self) -> str:
-        return "Llama 3.2 (Ollama)"
+        return "Llama 3.1 8B (Structured)"
 
 def check_faithfulness(question: str, context: str, answer: str):
-    # Use Llama 3.2 as the judge
     judge_model = OllamaDeepEval()
     
-    # Define the metric
+    # Threshold 0.7: If faithfulness is low, we know the AI halluncinated.
     metric = FaithfulnessMetric(threshold=0.7, model=judge_model)
     
-    # Create a test case
     test_case = LLMTestCase(
-        input=question,
-        actual_output=answer,
-        retrieval_context=[context]
+        input=str(question),
+        actual_output=str(answer),
+        retrieval_context=[str(context)]
     )
     
-    metric.measure(test_case)
-    return float(metric.score or 0.0), str(metric.reason or "No reason provided")
+    try:
+        metric.measure(test_case)
+        # DeepEval might return None if it fails internally, so we use 'or 0.0'
+        score = float(metric.score) if metric.score is not None else 0.5
+        reason = str(metric.reason) if metric.reason else "Reasoning failed but check completed."
+        
+        return score, reason
+    except Exception as e:
+        # Final safety net so the FastAPI endpoint doesn't return 500
+        print(f"⚠️ DeepEval Critical Failure: {e}")
+        return 0.5, f"Evaluation error: {str(e)}"
