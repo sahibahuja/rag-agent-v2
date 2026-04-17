@@ -10,6 +10,7 @@ from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langchain_core.runnables import RunnableConfig
 from typing import cast
 from opentelemetry import trace
+
 # --- 1. Lifespan Orchestration ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -66,7 +67,7 @@ async def ingest_file(payload: StorePayload, background_tasks: BackgroundTasks):
 
 
 @app.post("/v2/agent/chat")
-async def chat_endpoint(payload: ChatPayload, background_tasks: BackgroundTasks): # <--- Added BackgroundTasks
+async def chat_endpoint(payload: ChatPayload, background_tasks: BackgroundTasks): 
     from app.graph import agent_builder, GraphState
     
     thread_id = payload.thread_id or "default_session_1"
@@ -95,7 +96,7 @@ async def chat_endpoint(payload: ChatPayload, background_tasks: BackgroundTasks)
     context_str = "\n".join(final_state.get("context", []))
     sources = final_state.get("sources", [])
     
-   # 3
+    # 3. Trigger DeepEval in the background
     background_tasks.add_task(
         run_background_eval, 
         payload.question, 
@@ -109,9 +110,44 @@ async def chat_endpoint(payload: ChatPayload, background_tasks: BackgroundTasks)
         "answer": answer,
         "sources": sources,
         "iteration_count": final_state.get("iteration_count", 0),
-        "faithfulness_score": -1.0, # Float to pass Pydantic validation
+        "faithfulness_score": -1.0, 
         "faithfulness_reason": "Evaluation is running in the background. Check server logs."
     }
+
+# 🚨 UPGRADED ENDPOINT FOR STREAMLIT 🚨
+@app.get("/v2/agent/history/{thread_id}")
+async def get_history(thread_id: str):
+    """
+    Time-travels through Redis to reconstruct the entire chat history 
+    for a specific thread ID.
+    """
+    from app.graph import agent_builder
+    from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+    from langchain_core.runnables import RunnableConfig
+    from typing import cast
+    
+    redis_uri = "redis://localhost:6379"
+    config = cast(RunnableConfig, {"configurable": {"thread_id": thread_id}})
+    
+    async with AsyncRedisSaver.from_conn_string(redis_uri) as checkpointer:
+        graph = agent_builder.compile(checkpointer=checkpointer)
+        
+        full_chat_history = []
+        seen_questions = set()
+        
+        # Time-travel backwards through all saved checkpoints
+        async for snapshot in graph.aget_state_history(config):
+            q = snapshot.values.get("question", "")
+            r = snapshot.values.get("response", "")
+            
+            # If we found a valid pair we haven't processed yet
+            if q and r and q not in seen_questions:
+                seen_questions.add(q)
+                # Insert at the beginning so the oldest messages stay at the top!
+                full_chat_history.insert(0, {"role": "assistant", "content": r})
+                full_chat_history.insert(0, {"role": "user", "content": q})
+                
+        return {"messages": full_chat_history}
 
 if __name__ == "__main__":
     uvicorn.run("app.main:app", host="0.0.0.0", port=8080, reload=False)
