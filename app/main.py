@@ -139,12 +139,13 @@ async def get_history(thread_id: str):
         async for snapshot in graph.aget_state_history(config):
             q = snapshot.values.get("question", "")
             r = snapshot.values.get("response", "")
+            s = snapshot.values.get("sources", [])
             
             # If we found a valid pair we haven't processed yet
             if q and r and q not in seen_questions:
                 seen_questions.add(q)
                 # Insert at the beginning so the oldest messages stay at the top!
-                full_chat_history.insert(0, {"role": "assistant", "content": r})
+                full_chat_history.insert(0, {"role": "assistant", "content": r, "sources": s})
                 full_chat_history.insert(0, {"role": "user", "content": q})
                 
         return {"messages": full_chat_history}

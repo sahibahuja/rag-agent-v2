@@ -5,24 +5,10 @@ from app.nodes import (
     retrieve_docs, 
     grade_documents, 
     generate_answer, 
-    route_question  # 🚨 ADDED: Import the router!
+    route_question,  # 🚨 ADDED: Import the router!
+    decide_to_generate
 )
 
-# 1. Define the Router (Conditional Logic for Loops)
-def decide_to_generate(state: GraphState):
-    print("--- DECIDING NEXT STEP ---")
-    relevance = state.get("is_relevant", "no")
-    count = state.get("iteration_count", 0)
-    
-    # 🚨 Put this line back in!
-    print(f"DEBUG: Current iteration: {count}, Relevance: {relevance}")
-    
-    if relevance == "yes" or count >= 1:
-        print("--- DECISION: GENERATE (Limit reached or relevant) ---")
-        return "generate"
-    else:
-        print("--- DECISION: REWRITE ---")
-        return "rewrite"
 
 builder = StateGraph(GraphState)
 

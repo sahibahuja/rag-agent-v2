@@ -66,12 +66,21 @@ def grade_documents(state: GraphState):
     
     return {"is_relevant": grade}
 
-# --- 4. The Decision Node (PILLAR 4 Speed Cap) ---
+# 1. Define the Router (Conditional Logic for Loops)
 def decide_to_generate(state: GraphState):
     print("--- DECIDING NEXT STEP ---")
-    if state.get("is_relevant") == "yes" or state.get("iteration_count", 0) >= 2:
+    relevance = state.get("is_relevant", "no")
+    count = state.get("iteration_count", 0)
+    
+    # 🚨 Put this line back in!
+    print(f"DEBUG: Current iteration: {count}, Relevance: {relevance}")
+    
+    if relevance == "yes" or count >= 1:
+        print("--- DECISION: GENERATE (Limit reached or relevant) ---")
         return "generate"
-    return "rewrite"
+    else:
+        print("--- DECISION: REWRITE ---")
+        return "rewrite"
 
 # --- 5. The Rewriter Node ---
 def rewrite_query(state: GraphState):
