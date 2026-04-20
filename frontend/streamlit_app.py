@@ -1,6 +1,7 @@
 import os  # 🚨 Moved to the top!
 import streamlit as st
 import requests
+import json
 
 # --- Configuration ---
 FASTAPI_BASE_URL = "http://localhost:8080"
@@ -71,36 +72,59 @@ for i, msg in enumerate(st.session_state.messages):
 # --- Chat Input ---
 if prompt := st.chat_input("Ask a question about your documents..."):
     
-    # 1. Show user message
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     # 2. Show assistant message (thinking -> responding)
     with st.chat_message("assistant"):
-        with st.spinner("Agent is thinking..."):
-            # Call the FastAPI endpoint with the active Thread ID
-            payload = {
-                "question": prompt,
-                "thread_id": selected_thread_id
-            }
-            response = requests.post(f"{FASTAPI_BASE_URL}/v2/agent/chat", json=payload).json()
-            
-            answer = response.get("answer", "Error generating response.")
-            sources = response.get("sources", [])
-            
-            # 🚨 THE FIX: Save BOTH the answer and the sources to session state!
-            st.session_state.messages.append({
-                "role": "assistant", 
-                "content": answer,
-                "sources": sources
-            })
-            
-            # Handle the Background Eval UI (We just save this logic for the active response)
-            if response.get("faithfulness_score") == -1.0:
-                with st.expander("DeepEval Status", expanded=False):
-                    st.info("Validation is running in the background. Check Arize Phoenix for the final faithfulness score.")
-            
-            # 🚨 THE FIX: Force Streamlit to instantly redraw the screen from the top down.
-            # This ensures the download buttons are rendered by the main history loop safely.
-            st.rerun()
+        message_placeholder = st.empty()
+        
+        # 🚨 THE NEW UX: Custom CSS for Bouncing Dots Animation 🚨
+        thinking_html = """
+        <style>
+        .typing-indicator { display: flex; align-items: center; gap: 6px; padding: 10px 5px; }
+        .typing-indicator span { width: 8px; height: 8px; background-color: #888888; border-radius: 50%; display: inline-block; animation: bounce 1.4s infinite ease-in-out both; }
+        .typing-indicator span:nth-child(1) { animation-delay: -0.32s; }
+        .typing-indicator span:nth-child(2) { animation-delay: -0.16s; }
+        @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+        </style>
+        <div class="typing-indicator"><span></span><span></span><span></span></div>
+        """
+        # Inject the animation into the empty placeholder immediately
+        message_placeholder.markdown(thinking_html, unsafe_allow_html=True)
+        
+        full_response = ""
+        sources = []
+        
+        payload = {"question": prompt, "thread_id": selected_thread_id}
+        
+        # Open a streaming connection to FastAPI
+        with requests.post(f"{FASTAPI_BASE_URL}/v2/agent/chat", json=payload, stream=True) as response:
+            for line in response.iter_lines():
+                if line:
+                    decoded_line = line.decode('utf-8')
+                    if decoded_line.startswith("data: "):
+                        data = json.loads(decoded_line[6:])
+                        
+                        # 1. First token arrives! The animation is instantly overwritten.
+                        if data["type"] == "token":
+                            full_response += data["content"]
+                            message_placeholder.markdown(full_response + "▌") 
+                            
+                        # 2. Grab the metadata
+                        elif data["type"] == "metadata":
+                            sources = data["sources"]
+        
+        # The stream is finished! Remove the cursor
+        message_placeholder.markdown(full_response)
+        
+        # Save to local UI state
+        st.session_state.messages.append({
+            "role": "assistant", 
+            "content": full_response,
+            "sources": sources
+        })
+        
+        # Force a rerun so the main loop can draw the download buttons!
+        st.rerun()

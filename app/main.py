@@ -10,6 +10,8 @@ from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langchain_core.runnables import RunnableConfig
 from typing import cast
 from opentelemetry import trace
+from fastapi.responses import StreamingResponse
+import json
 
 # --- 1. Lifespan Orchestration ---
 @asynccontextmanager
@@ -83,37 +85,55 @@ async def chat_endpoint(payload: ChatPayload, background_tasks: BackgroundTasks)
         "faithfulness_score": 0.0,
         "faithfulness_reason": ""
     })
-    
-    redis_uri = "redis://localhost:6379"
-    async with AsyncRedisSaver.from_conn_string(redis_uri) as checkpointer:
-        agent_graph = agent_builder.compile(checkpointer=checkpointer)
-        
-        # 1. Run the graph (this is now fast!)
-        final_state = await agent_graph.ainvoke(inputs, config) 
-    
-    # 2. Extract results
-    answer = final_state.get("response", "I'm sorry, I couldn't find an answer.")
-    context_str = "\n".join(final_state.get("context", []))
-    sources = final_state.get("sources", [])
-    
-    # 3. Trigger DeepEval in the background
-    background_tasks.add_task(
-        run_background_eval, 
-        payload.question, 
-        context_str, 
-        answer,
-        thread_id # <--- Passing the Correlation ID
-    )
-    
-    # 4. Return to user immediately!
-    return {
-        "answer": answer,
-        "sources": sources,
-        "iteration_count": final_state.get("iteration_count", 0),
-        "faithfulness_score": -1.0, 
-        "faithfulness_reason": "Evaluation is running in the background. Check server logs."
-    }
 
+    # 🚨 THE STREAMING GENERATOR 🚨
+    async def stream_generator():
+        redis_uri = "redis://localhost:6379"
+        full_answer = ""
+        final_state = None
+        
+        async with AsyncRedisSaver.from_conn_string(redis_uri) as checkpointer:
+            agent_graph = agent_builder.compile(checkpointer=checkpointer)
+            
+            async for event in agent_graph.astream_events(inputs, config, version="v2"):
+                
+                # 🚨 THE FIX: Identify WHICH node is currently running
+                current_node = event.get("metadata", {}).get("langgraph_node")
+                
+                # ONLY stream if the event is a stream AND the node is your generator
+                # Note: Change "generate" to whatever you named your final node in graph.py!
+                if event["event"] == "on_chat_model_stream" and current_node == "generate":
+                    
+                    chunk_obj = event["data"].get("chunk")
+                    
+                    if chunk_obj and hasattr(chunk_obj, "content"):
+                        chunk_text = chunk_obj.content
+                        
+                        if chunk_text:
+                            full_answer += chunk_text
+                            yield f"data: {json.dumps({'type': 'token', 'content': chunk_text})}\n\n"
+            
+            # Grab the final state after the stream finishes
+            final_state = await agent_graph.aget_state(config)
+            
+        # The LLM is done talking. Now extract sources.
+        context_str = "\n".join(final_state.values.get("context", []))
+        sources = final_state.values.get("sources", [])
+        
+        # Send the final metadata (sources) to the frontend
+        yield f"data: {json.dumps({'type': 'metadata', 'sources': sources})}\n\n"
+        
+        # Trigger DeepEval in the background NOW that the full answer is complete
+        background_tasks.add_task(
+            run_background_eval, 
+            payload.question, 
+            context_str, 
+            full_answer,
+            thread_id 
+        )
+
+    # Return the stream instead of a static JSON dictionary
+    return StreamingResponse(stream_generator(), media_type="text/event-stream")
 # 🚨 UPGRADED ENDPOINT FOR STREAMLIT 🚨
 @app.get("/v2/agent/history/{thread_id}")
 async def get_history(thread_id: str):
